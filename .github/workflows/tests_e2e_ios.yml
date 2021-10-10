@@ -70,14 +70,6 @@ jobs:
           max_attempts: 3
           command: yarn --no-audit --prefer-offline && npm i -g cavy-cli
 
-      - name: Build iOS App
-        run: |
-          export SKIP_BUNDLING=1
-          export RCT_NO_LAUNCH_PACKAGER=1
-          cd tests_react_native/ios
-          xcodebuild -workspace testing.xcworkspace -scheme Notifee -configuration Debug -sdk iphonesimulator -derivedDataPath build | xcpretty
-        shell: bash
-
       - name: Install applesimutils
         uses: nick-invision/retry@v2
         with:
@@ -98,16 +90,42 @@ jobs:
           curl --output /dev/null --silent --head --fail "http://localhost:8081/index.bundle?platform=ios&dev=true&minify=false&inlineSourceMap=true"
           echo "...javascript bundle ready"
 
+      - uses: hendrikmuhs/ccache-action@v1
+        name: Xcode Compile Cache
+        with:
+          key: ${{ runner.os }}-v2 # makes a unique key w/related restore key internally
+          max-size: 400M
+
+      - name: Build App, Boot Simulator, Run App
+        run: |
+          export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+          export CCACHE_SLOPPINESS=clang_index_store,file_stat_matches,include_file_ctime,include_file_mtime,ivfsoverlay,pch_defines,modules,system_headers,time_macros
+          export CCACHE_FILECLONE=true
+          export CCACHE_DEPEND=true
+          export CCACHE_INODECACHE=true
+          ccache -s
+          export SKIP_BUNDLING=1
+          export RCT_NO_LAUNCH_PACKAGER=1
+          yarn run:ios
+          ccache -s
+        shell: bash
+
       - name: Create Simulator Log
-        # With a little delay so the detox test below has time to spawn it, missing the first part of boot is fine
-        # If you boot the simulator separately from detox, some other race fails and detox testee never sends ready to proxy
+        # With a little delay, missing the first part of boot is fine, it will still capture app issues
         continue-on-error: true
-        run: nohup sh -c "sleep 30 && xcrun simctl spawn booted log stream --level debug --style compact > simulator.log 2>&1 &"
+        run: nohup sh -c "sleep 10 && xcrun simctl spawn booted log stream --level debug --style compact > simulator.log 2>&1 &"
+
+      - name: Grant Notification Permission
+        run: applesimutils --booted --setPermissions notifications=YES --bundle com.notifee.testing
+
+      - name: Restart App
+        # The permission grant restarts Springboard, so we launch cleanly again here
+        run: yarn run:ios
 
       - name: E2E Test
         timeout-minutes: 30
         continue-on-error: true
-        run: yarn tests_rn:ios:test
+        run: yarn tests_rn:ios:test-ci
 
       - name: Compress Simulator Log
         if: always()
